@@ -68,7 +68,7 @@ set_nonblock (int fd)
 static ssize_t 
 nosigpipe_push(void *data, const void *buf, size_t len)
 {
-  int fd = (int)data;
+  int fd = (int)(long)data;
   int flags = 0;
 #ifdef MSG_NOSIGNAL
   flags = MSG_NOSIGNAL;
@@ -277,13 +277,18 @@ static void
 on_readable(struct ev_loop *loop, ev_io *watcher, int revents)
 {
   ebb_connection *connection = watcher->data;
-  char recv_buffer[TCP_MAXWIN];
+  size_t offset = connection->buffered_data;
+  int left = EBB_READ_BUFFER - offset;
+  char* recv_buffer = connection->read_buffer + offset;
   ssize_t recved;
 
   //printf("on_readable\n");
   // TODO -- why is this broken?
   //assert(ev_is_active(&connection->timeout_watcher));
   assert(watcher == &connection->read_watcher);
+
+  // No more buffer space.
+  if(left == 0) goto error;
 
   if(EV_ERROR & revents) {
     error("on_readable() got error event, closing connection.");
@@ -296,7 +301,7 @@ on_readable(struct ev_loop *loop, ev_io *watcher, int revents)
   if(connection->server->secure) {
     recved = gnutls_record_recv( connection->session
                                , recv_buffer
-                               , TCP_MAXWIN
+                               , left
                                );
     if(recved <= 0) {
       if(gnutls_error_is_fatal(recved)) goto error;
@@ -308,16 +313,23 @@ on_readable(struct ev_loop *loop, ev_io *watcher, int revents)
   } else {
 #endif /* HAVE_GNUTLS */
 
-    recved = recv(connection->fd, recv_buffer, TCP_MAXWIN, 0);
+    recved = recv(connection->fd, recv_buffer, left, 0);
     if(recved <= 0) goto error;
 
 #ifdef HAVE_GNUTLS
   }
 #endif /* HAVE_GNUTLS */
 
+  connection->buffered_data += recved;
+
   ebb_connection_reset_timeout(connection);
 
-  ebb_request_parser_execute(&connection->parser, recv_buffer, recved);
+  ebb_request_parser_execute(&connection->parser, connection->read_buffer,
+                             recved, offset);
+
+  if(ebb_request_parser_is_finished(&connection->parser)) {
+    connection->buffered_data = 0;
+  }
 
   /* parse error? just drop the client. screw the 400 response */
   if(ebb_request_parser_has_error(&connection->parser)) goto error;
@@ -364,7 +376,7 @@ on_writable(struct ev_loop *loop, ev_io *watcher, int revents)
   } else {
 #endif /* HAVE_GNUTLS */
 
-    sent = nosigpipe_push( (void*)connection->fd
+    sent = nosigpipe_push( (void*)(long)connection->fd
                          , connection->to_write + connection->written
                          , connection->to_write_len - connection->written
                          );
@@ -718,6 +730,8 @@ ebb_connection_init(ebb_connection *connection)
   connection->server = NULL;
   connection->ip = NULL;
   connection->open = FALSE;
+
+  connection->buffered_data = 0;
 
   ebb_request_parser_init( &connection->parser );
   connection->parser.data = connection;

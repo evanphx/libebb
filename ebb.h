@@ -67,6 +67,8 @@ struct ebb_server {
   void *data;
 };
 
+#define EBB_READ_BUFFER 8192
+
 struct ebb_connection {
   int fd;                      /* ro */
   struct sockaddr_in sockaddr; /* ro */
@@ -90,6 +92,9 @@ struct ebb_connection {
   gnutls_session_t session;    /* private */
   ev_io goodbye_tls_watcher;       /* private */
 #endif
+
+  int buffered_data;
+  char read_buffer[EBB_READ_BUFFER];
 
   /* Public */
 

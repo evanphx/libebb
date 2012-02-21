@@ -90,12 +90,18 @@ struct ebb_request_parser {
   size_t chunk_size;                /* private */
   unsigned eating:1;                /* private */
   ebb_request *current_request;     /* ro */
-  const char *header_field_mark; 
-  const char *header_value_mark; 
-  const char *query_string_mark; 
-  const char *path_mark; 
-  const char *uri_mark; 
-  const char *fragment_mark; 
+  int header_field_start; 
+  int header_field_end; 
+  int header_value_start; 
+  int header_value_end; 
+  int query_string_start; 
+  int query_string_end; 
+  int path_start; 
+  int path_end; 
+  int uri_start; 
+  int uri_end; 
+  int fragment_start; 
+  int fragment_end; 
 
   /* Public */
   ebb_request* (*new_request)(void*);
@@ -103,7 +109,7 @@ struct ebb_request_parser {
 };
 
 void ebb_request_parser_init(ebb_request_parser *parser);
-size_t ebb_request_parser_execute(ebb_request_parser *parser, const char *data, size_t len);
+size_t ebb_request_parser_execute(ebb_request_parser *parser, const char *data, size_t len, size_t off);
 int ebb_request_parser_has_error(ebb_request_parser *parser);
 int ebb_request_parser_is_finished(ebb_request_parser *parser);
 void ebb_request_init(ebb_request *);

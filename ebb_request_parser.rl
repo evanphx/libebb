@@ -47,17 +47,21 @@ static int unhex[] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
 #define CURRENT (parser->current_request)
 #define CONTENT_LENGTH (parser->current_request->content_length)
 #define CALLBACK(FOR)                               \
-  if(CURRENT && parser->FOR##_mark && CURRENT->on_##FOR) {     \
+  if(CURRENT && \
+      parser->FOR##_start >= 0 && parser->FOR##_end >= 0 && \
+      CURRENT->on_##FOR) {     \
     CURRENT->on_##FOR( CURRENT                      \
-                , parser->FOR##_mark                \
-                , p - parser->FOR##_mark            \
+                , buf + parser->FOR##_start                \
+                , parser->FOR##_end - parser->FOR##_start            \
                 );                                  \
  }
 #define HEADER_CALLBACK(FOR)                        \
-  if(CURRENT && parser->FOR##_mark && CURRENT->on_##FOR) {     \
+  if(CURRENT && \
+      parser->FOR##_start >= 0 && parser->FOR##_end >= 0 && \
+      CURRENT->on_##FOR) {     \
     CURRENT->on_##FOR( CURRENT                      \
-                , parser->FOR##_mark                \
-                , p - parser->FOR##_mark            \
+                , buf + parser->FOR##_start                \
+                , parser->FOR##_end - parser->FOR##_start            \
                 , CURRENT->number_of_headers        \
                 );                                  \
  }
@@ -70,41 +74,52 @@ static int unhex[] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
 %%{
   machine ebb_request_parser;
 
-  action mark_header_field   { parser->header_field_mark   = p; }
-  action mark_header_value   { parser->header_value_mark   = p; }
-  action mark_fragment       { parser->fragment_mark       = p; }
-  action mark_query_string   { parser->query_string_mark   = p; }
-  action mark_request_path   { parser->path_mark           = p; }
-  action mark_request_uri    { parser->uri_mark            = p; }
+  action start_header_field   { parser->header_field_start  = p - buf; }
+  action end_header_field     { parser->header_field_end    = p - buf; }
+
+  action start_header_value   { parser->header_value_start  = p - buf; }
+  action end_header_value     { parser->header_value_end    = p - buf; }
+
+  action start_fragment       { parser->fragment_start      = p - buf; }
+  action end_fragment         { parser->fragment_end        = p - buf; }
+
+  action start_query_string   { parser->query_string_start  = p - buf; }
+  action end_query_string     { parser->query_string_end    = p - buf; }
+
+  action start_request_path   { parser->path_start          = p - buf; }
+  action end_request_path     { parser->path_end            = p - buf; }
+
+  action start_request_uri    { parser->uri_start           = p - buf; }
+  action end_request_uri      { parser->uri_end             = p - buf; }
 
   action write_field { 
     HEADER_CALLBACK(header_field);
-    parser->header_field_mark = NULL;
+    parser->header_field_start = -1;
   }
 
   action write_value {
     HEADER_CALLBACK(header_value);
-    parser->header_value_mark = NULL;
+    parser->header_value_start = -1;
   }
 
   action request_uri { 
     CALLBACK(uri);
-    parser->uri_mark = NULL;
+    parser->uri_start = -1;
   }
 
   action fragment { 
     CALLBACK(fragment);
-    parser->fragment_mark = NULL;
+    parser->fragment_start = -1;
   }
 
   action query_string { 
     CALLBACK(query_string);
-    parser->query_string_mark = NULL;
+    parser->query_string_start = -1;
   }
 
   action request_path {
     CALLBACK(path);
-    parser->path_mark = NULL;
+    parser->path_start = parser->path_end = -1;
   }
 
   action content_length {
@@ -246,19 +261,19 @@ static int unhex[] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
   scheme = ( alpha | digit | "+" | "-" | "." )* ;
   absolute_uri = (scheme ":" (uchar | reserved )*);
   path = ( pchar+ ( "/" pchar* )* ) ;
-  query = ( uchar | reserved )* >mark_query_string %query_string ;
+  query = ( uchar | reserved )* >start_query_string %end_query_string %query_string ;
   param = ( pchar | "/" )* ;
   params = ( param ( ";" param )* ) ;
   rel_path = ( path? (";" params)? ) ;
-  absolute_path = ( "/"+ rel_path ) >mark_request_path %request_path ("?" query)?;
-  Request_URI = ( "*" | absolute_uri | absolute_path ) >mark_request_uri %request_uri;
-  Fragment = ( uchar | reserved )* >mark_fragment %fragment;
+  absolute_path = ( "/"+ rel_path ) >start_request_path %end_request_path ("?" query)?;
+  Request_URI = ( "*" | absolute_uri | absolute_path ) >start_request_uri %end_request_uri;
+  Fragment = ( uchar | reserved )* >start_fragment %end_fragment %fragment;
 
   field_name = ( token -- ":" )+;
-  Field_Name = field_name >mark_header_field %write_field;
+  Field_Name = field_name >start_header_field %end_header_field;
 
   field_value = ((any - " ") any*)?;
-  Field_Value = field_value >mark_header_value %write_value;
+  Field_Value = field_value >start_header_value %end_header_value;
 
   hsep = ":" " "*;
   header = (field_name hsep field_value) :> CRLF;
@@ -269,13 +284,11 @@ static int unhex[] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
                )
              )
            | ("Transfer-Encoding"i %use_chunked_encoding hsep "identity" %use_identity_encoding)
-         # | ("Expect"i hsep "100-continue"i %expect_continue)
-         # | ("Trailer"i hsep field_value %trailer)
            | (Field_Name hsep Field_Value)
            ) :> CRLF;
 
-  Request_Line = ( Method " " Request_URI ("#" Fragment)? " " HTTP_Version CRLF ) ;
-  RequestHeader = Request_Line (Header %end_header_line)* :> CRLF @end_headers;
+  Request_Line = ( Method " " Request_URI ("#" Fragment)? " " %request_path %request_uri HTTP_Version CRLF ) ;
+  RequestHeader = Request_Line (Header %write_field %write_value %end_header_line)* :> CRLF @end_headers;
 
 # chunked message
   trailing_headers = header*;
@@ -327,37 +340,35 @@ void ebb_request_parser_init(ebb_request_parser *parser)
   
   parser->current_request = NULL;
 
-  parser->header_field_mark = parser->header_value_mark   = 
-  parser->query_string_mark = parser->path_mark           = 
-  parser->uri_mark          = parser->fragment_mark       = NULL;
+  parser->header_field_start = parser->header_field_end = -1;
+  parser->header_value_start = parser->header_value_end = -1;
+  parser->query_string_start = parser->query_string_end = -1;
+  parser->path_start = parser->path_end = -1;
+  parser->uri_start = parser->uri_end = -1;
+  parser->fragment_start = parser->fragment_end = -1;
 
   parser->new_request = NULL;
 }
 
 
 /** exec **/
-size_t ebb_request_parser_execute(ebb_request_parser *parser, const char *buffer, size_t len)
+size_t ebb_request_parser_execute(ebb_request_parser *parser, const char *buffer, size_t len, size_t off)
 {
   const char *p, *pe;
   int cs = parser->cs;
 
   assert(parser->new_request && "undefined callback");
 
-  p = buffer;
-  pe = buffer+len;
+  p = buffer+off;
+  pe = buffer+off+len;
+
+  const char* buf = buffer;
 
   if(0 < parser->chunk_size && parser->eating) {
     /* eat body */
     size_t eat = MIN(len, parser->chunk_size);
     skip_body(&p, parser, eat);
   } 
-
-  if(parser->header_field_mark)   parser->header_field_mark   = buffer;
-  if(parser->header_value_mark)   parser->header_value_mark   = buffer;
-  if(parser->fragment_mark)       parser->fragment_mark       = buffer;
-  if(parser->query_string_mark)   parser->query_string_mark   = buffer;
-  if(parser->path_mark)           parser->path_mark           = buffer;
-  if(parser->uri_mark)            parser->uri_mark            = buffer;
 
   %% write exec;
 
